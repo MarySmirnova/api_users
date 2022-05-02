@@ -2,26 +2,25 @@ package api
 
 import (
 	"context"
-	"crypto/sha256"
-	"crypto/subtle"
+	"errors"
 	"net/http"
 
 	"github.com/MarySmirnova/api_users/internal/config"
 	"github.com/MarySmirnova/api_users/internal/database"
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
+
+	log "github.com/sirupsen/logrus"
 )
 
-type ctxKey string
-
-const isAdmin ctxKey = "is_admin"
+var ErrPermissionsDenied error = errors.New("insufficient permissions")
 
 type Storage interface {
-	NewUser(database.User) (uuid.UUID, error)
-	GetAllUsers() []database.User
-	GetUserByID(uuid.UUID) (database.User, error)
-	GetUserByName(string) (database.User, error)
-	UpdateUser(database.User) error
+	NewUser(*database.User) error
+	GetAllUsers() []*database.User
+	GetUserByID(uuid.UUID) (*database.User, error)
+	GetUserByName(string) (*database.User, error)
+	UpdateUser(*database.User) error
 	DeleteUser(uuid.UUID) error
 }
 
@@ -37,11 +36,11 @@ func New(cfg config.API, s Storage) *API {
 
 	handler := mux.NewRouter()
 	handler.Use(a.AuthMiddleware)
-	handler.Name("create_user").Methods(http.MethodPost).Path("/user").HandlerFunc(a.newUserHandler)
-	handler.Name("get_all_users").Methods(http.MethodGet).Path("/user").HandlerFunc(a.getUsersHandler)
-	handler.Name("get_user").Methods(http.MethodGet).Path("/user/{id}").HandlerFunc(a.getUserByIDHandler)
-	handler.Name("update_user").Methods(http.MethodPatch).Path("/user/{id}").HandlerFunc(a.updateUserHandler)
-	handler.Name("delete_user").Methods(http.MethodDelete).Path("/user/{id}").HandlerFunc(a.deleteUserHandler)
+	handler.Name("create_user").Methods(http.MethodPost).Path("/user").HandlerFunc(a.NewUserHandler)
+	handler.Name("get_all_users").Methods(http.MethodGet).Path("/user").HandlerFunc(a.GetUsersHandler)
+	handler.Name("get_user").Methods(http.MethodGet).Path("/user/{id}").HandlerFunc(a.GetUserByIDHandler)
+	handler.Name("update_user").Methods(http.MethodPatch).Path("/user/{id}").HandlerFunc(a.UpdateUserHandler)
+	handler.Name("delete_user").Methods(http.MethodDelete).Path("/user/{id}").HandlerFunc(a.DeleteUserHandler)
 
 	a.httpServer = &http.Server{
 		Addr:         cfg.Listen,
@@ -59,28 +58,47 @@ func (a *API) GetHTTPServer() *http.Server {
 
 func (a *API) AuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		uname, pass, ok := r.BasicAuth()
+		username, password, ok := r.BasicAuth()
 		if !ok {
-			u, err := a.store.GetUserByName(uname)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-			}
-
-			passHash := sha256.Sum256([]byte(pass))
-			expectPassHash := sha256.Sum256([]byte(u.Password))
-			matchPass := (subtle.ConstantTimeCompare(passHash[:], expectPassHash[:]) == 1)
-
-			permis := u.Admin
-
-			if matchPass {
-				ctx := context.WithValue(r.Context(), isAdmin, permis)
-				w.Header().Set("Content-Type", "application/json")
-				next.ServeHTTP(w, r.WithContext(ctx))
-				return
-			}
+			a.askPassword(w)
+			return
 		}
 
-		w.Header().Set("WWW-Authenticate", `Basic realm="restricted", charset="UTF-8"`)
-		callError(w, ErrUnauthorized, http.StatusUnauthorized)
+		user, err := a.store.GetUserByName(username)
+		if err != nil {
+			if errors.Is(err, database.ErrUserNotExist) {
+				a.askPassword(w)
+				return
+			}
+			a.internalError(w, err)
+			return
+		}
+
+		if !user.CheckPassword(password) {
+			a.askPassword(w)
+			return
+		}
+
+		ctx := context.WithValue(r.Context(), ContextAdminKey, user.Admin)
+
+		w.Header().Set("Content-Type", "application/json")
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+func (a *API) askPassword(w http.ResponseWriter) {
+	w.Header().Set("WWW-Authenticate", `Basic realm="restricted", charset="UTF-8"`)
+	w.WriteHeader(http.StatusUnauthorized)
+}
+
+func (a *API) internalError(w http.ResponseWriter, err error) {
+	log.WithError(err).Error("unable to get user from the store")
+	w.WriteHeader(http.StatusInternalServerError)
+	_, _ = w.Write([]byte("something went wrong"))
+}
+
+func (a *API) writeResponseError(w http.ResponseWriter, err error, code int) {
+	log.WithError(err).Error("api error")
+	w.WriteHeader(code)
+	_, _ = w.Write([]byte(err.Error()))
 }

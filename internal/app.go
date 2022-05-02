@@ -29,7 +29,7 @@ func NewApplication(cfg config.Application) (*Application, error) {
 
 func (a *Application) initDatabase() error {
 	db := database.New()
-	_, err := db.NewUser(database.User{
+	err := db.NewUser(&database.User{
 		Username: a.cfg.AdminUsername,
 		Password: a.cfg.AdminPass,
 		Admin:    true,

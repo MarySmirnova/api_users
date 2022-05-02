@@ -1,106 +1,263 @@
 package database
 
 import (
-	"reflect"
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
+	"golang.org/x/crypto/bcrypt"
 )
 
-func TestDB_User(t *testing.T) {
-	db := New()
+func TestUser_CheckPassword(t *testing.T) {
+	password := "qwerty"
+	hash, _ := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+
 	u := User{
-		Email:    "mail.ru",
-		Username: "Admin",
-		Password: "qwerty",
+		Password: string(hash),
+	}
+
+	assert.True(t, u.CheckPassword(password), "Checking password should be correct")
+}
+
+func TestUser_UpdateFields_ChangePassword(t *testing.T) {
+	id := uuid.New()
+	newPassword := "12345"
+	oldHashedPassword, _ := bcrypt.GenerateFromPassword([]byte("qwery"), bcrypt.DefaultCost)
+
+	oldUser := &User{
+		ID:       id,
+		Password: string(oldHashedPassword),
+	}
+
+	newUser := &User{
+		ID:       id,
+		Password: newPassword,
+	}
+
+	_ = newUser.UpdateFields(oldUser)
+
+	assert.True(t, newUser.CheckPassword(newPassword))
+}
+
+func TestUser_UpdateFields_CopyFields(t *testing.T) {
+	id := uuid.New()
+	username := "1"
+	email := "e@mail.ru"
+	oldHashedPassword, _ := bcrypt.GenerateFromPassword([]byte("qwery"), bcrypt.DefaultCost)
+
+	oldUser := &User{
+		ID:       id,
+		Username: username,
+		Password: string(oldHashedPassword),
+		Email:    email,
 		Admin:    true,
 	}
 
-	//testing NewUser
-	id, _ := db.NewUser(u)
-	u.ID = id
-
-	_, err := db.NewUser(u)
-	if err != ErrNameAlreadyExist {
-		t.Errorf("incorrect error: got %v, want %v", err, ErrNameAlreadyExist)
+	newUser := &User{
+		ID: id,
 	}
 
-	//testing GetUserByID
-	user, _ := db.GetUserByID(id)
-	if !reflect.DeepEqual(user, u) {
-		t.Errorf("created user not found: got %v, want %v", user, u)
+	wantUser := &User{
+		ID:       id,
+		Username: username,
+		Password: string(oldHashedPassword),
+		Email:    email,
+		Admin:    false,
 	}
 
-	fakeID := uuid.New()
-	_, err = db.GetUserByID(fakeID)
-	if err != ErrUserNotExist {
-		t.Errorf("incorrect error: got %v, want %v", err, ErrUserNotExist)
-	}
+	_ = newUser.UpdateFields(oldUser)
 
-	//testing UpdateUser
-	id2, _ := db.NewUser(User{
-		Username: "NotAdmin",
-		Password: "qwerty",
+	assert.Equal(t, wantUser, newUser)
+}
+
+func TestDB_NewUser_ErrNameAlreadyExist(t *testing.T) {
+	db := New()
+
+	username := "1"
+
+	err := db.NewUser(&User{
+		Username: username,
+	})
+	assert.Nil(t, err, "Database shouldn't raise an error on first user creation")
+
+	err = db.NewUser(&User{
+		Username: username,
 	})
 
-	err = db.UpdateUser(User{
-		ID:       id2,
-		Username: "Admin",
-	})
-	if err != ErrNameAlreadyExist {
-		t.Errorf("incorrect error: got %v, want %v", err, ErrNameAlreadyExist)
-	}
+	assert.ErrorIs(t, err, ErrNameAlreadyExist)
+}
 
-	err = db.UpdateUser(User{
-		ID:       fakeID,
-		Username: "Kolya",
-	})
-	if err != ErrUserNotExist {
-		t.Errorf("incorrect error: got %v, want %v", err, ErrUserNotExist)
-	}
+func TestDB_GetAllUsers(t *testing.T) {
+	db := New()
 
-	wantPass := "12345"
-	db.UpdateUser(User{
-		ID:       id2,
-		Username: "NotAdmin",
-		Password: wantPass,
-	})
-	u2, _ := db.GetUserByID(id2)
-	if !reflect.DeepEqual(u2.Password, wantPass) {
-		t.Errorf("failed to update: got %s, want %s", u2.Password, wantPass)
+	user := &User{
+		Username: "1",
 	}
+	err := db.NewUser(user)
+	assert.Nil(t, err)
 
-	wantName := "Kolya"
-	db.UpdateUser(User{
-		ID:       id2,
-		Username: wantName,
-		Password: wantPass,
-	})
-	u2, _ = db.GetUserByID(id2)
-	if !reflect.DeepEqual(u2.Username, wantName) {
-		t.Errorf("failed to update: got %s, want %s", u2.Username, wantName)
-	}
-
-	//testing DeleteUser and GetAllUsers
-	err = db.DeleteUser(fakeID)
-	if err != ErrUserNotExist {
-		t.Errorf("incorrect error: got %v, want %v", err, ErrUserNotExist)
-	}
-
-	db.DeleteUser(id2)
 	users := db.GetAllUsers()
-	if len(users) != 1 {
-		t.Errorf("failed to delete")
+	assert.Equal(t, user, users[0])
+	assert.Equal(t, 1, len(users))
+}
+
+func TestDB_GetUserByName_ErrUserNotExist(t *testing.T) {
+	db := New()
+
+	err := db.NewUser(&User{
+		Username: "1",
+	})
+	assert.Nil(t, err)
+
+	_, err = db.GetUserByName("2")
+	assert.ErrorIs(t, err, ErrUserNotExist)
+}
+
+func TestDB_GetUserByName_GoodWay(t *testing.T) {
+	db := New()
+
+	username := "1"
+	user := &User{
+		Username: username,
 	}
 
-	//testing GetUserByName
-	_, err = db.GetUserByName("Kolya")
-	if err != ErrUserNotExist {
-		t.Errorf("incorrect error: got %v, want %v", err, ErrUserNotExist)
+	err := db.NewUser(user)
+	assert.Nil(t, err)
+
+	gotUser, _ := db.GetUserByName(username)
+	assert.Equal(t, user, gotUser)
+}
+
+func TestDB_GetUserByID_ErrUserNotExist(t *testing.T) {
+	db := New()
+
+	err := db.NewUser(&User{
+		Username: "1",
+	})
+	assert.Nil(t, err)
+
+	fakeKey := uuid.New()
+
+	_, err = db.GetUserByID(fakeKey)
+	assert.ErrorIs(t, err, ErrUserNotExist)
+}
+
+func TestDB_GetUserByID_GoodWay(t *testing.T) {
+	db := New()
+
+	user := &User{
+		Username: "1",
 	}
 
-	gotUser, _ := db.GetUserByName("Admin")
-	if !reflect.DeepEqual(gotUser, u) {
-		t.Errorf("incorrect data: got %v, want %v", gotUser, u)
+	err := db.NewUser(user)
+	assert.Nil(t, err)
+
+	gotUser, _ := db.GetUserByID(user.ID)
+	assert.Equal(t, user, gotUser)
+}
+
+func TestDB_UpdateUser_ErrUserNotExist(t *testing.T) {
+	db := New()
+
+	updateUser := &User{
+		ID:       uuid.New(),
+		Username: "new",
 	}
+
+	err := db.UpdateUser(updateUser)
+	assert.ErrorIs(t, err, ErrUserNotExist)
+}
+
+func TestDB_UpdateUser_ErrNameAlreadyExist(t *testing.T) {
+	db := New()
+
+	firstUserName := "exist"
+
+	err := db.NewUser(&User{
+		Username: firstUserName,
+	})
+	assert.Nil(t, err)
+
+	secondUser := &User{
+		Username: "second",
+	}
+	err = db.NewUser(secondUser)
+	assert.Nil(t, err)
+
+	updateUser := &User{
+		ID:       secondUser.ID,
+		Username: firstUserName,
+	}
+
+	err = db.UpdateUser(updateUser)
+	assert.ErrorIs(t, err, ErrNameAlreadyExist)
+}
+
+func TestDB_UpdateUser_GoodWay(t *testing.T) {
+	db := New()
+
+	wantUsername := "want"
+	wantEmail := "want@e.mail"
+
+	oldUser := &User{
+		Username: wantUsername,
+		Email:    "e@mai.l",
+	}
+
+	err := db.NewUser(oldUser)
+	assert.Nil(t, err)
+
+	wantID := oldUser.ID
+	wantPassword := oldUser.Password
+
+	newUser := &User{
+		ID:    wantID,
+		Email: wantEmail,
+	}
+
+	wantUser := &User{
+		ID:       wantID,
+		Username: wantUsername,
+		Email:    wantEmail,
+		Password: wantPassword,
+	}
+
+	err = db.UpdateUser(newUser)
+	assert.Nil(t, err)
+
+	gotUser, err := db.GetUserByID(wantID)
+	assert.Nil(t, err)
+	assert.Equal(t, wantUser, gotUser)
+}
+
+func TestDB_DeleteUser_ErrUserNotExist(t *testing.T) {
+	db := New()
+
+	err := db.NewUser(&User{
+		ID:       uuid.New(),
+		Username: "new",
+	})
+	assert.Nil(t, err)
+
+	fakeKey := uuid.New()
+
+	err = db.DeleteUser(fakeKey)
+	assert.ErrorIs(t, err, ErrUserNotExist)
+}
+
+func TestDB_DeleteUser_GoodWay(t *testing.T) {
+	db := New()
+
+	user := &User{
+		Username: "1",
+	}
+
+	err := db.NewUser(user)
+	assert.Nil(t, err)
+
+	err = db.DeleteUser(user.ID)
+	assert.Nil(t, err)
+
+	users := db.GetAllUsers()
+	assert.Equal(t, 0, len(users))
 }

@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 
@@ -13,153 +14,119 @@ import (
 
 var validate = validator.New()
 
-func (a *API) newUserHandler(w http.ResponseWriter, r *http.Request) {
-	admin, ok := r.Context().Value(isAdmin).(bool)
-	if !ok {
-		callError(w, ErrWrongContext, http.StatusInternalServerError)
-		return
-	}
-	if !admin {
-		callError(w, ErrPermissionsDenied, http.StatusForbidden)
+func (a *API) NewUserHandler(w http.ResponseWriter, r *http.Request) {
+	if !isAdminUser(r.Context()) {
+		a.writeResponseError(w, ErrPermissionsDenied, http.StatusForbidden)
 		return
 	}
 
 	var u database.User
 
-	err := json.NewDecoder(r.Body).Decode(&u)
-	if err != nil {
-		callError(w, fmt.Errorf("wrong JSON: %s", err), http.StatusBadRequest)
+	if err := json.NewDecoder(r.Body).Decode(&u); err != nil {
+		a.writeResponseError(w, fmt.Errorf("wrong JSON: %s", err), http.StatusBadRequest)
 		return
 	}
 
-	err = validate.Struct(u)
-	if err != nil {
-		callError(w, fmt.Errorf("invalid data passed: %s", err), http.StatusBadRequest)
+	if err := validate.Struct(u); err != nil {
+		a.writeResponseError(w, fmt.Errorf("invalid data passed: %s", err), http.StatusBadRequest)
 		return
 	}
 
-	id, err := a.store.NewUser(u)
-	if err != nil {
-		if err == database.ErrNameAlreadyExist {
-			callError(w, err, http.StatusBadRequest)
+	if err := a.store.NewUser(&u); err != nil {
+		if errors.Is(err, database.ErrNameAlreadyExist) {
+			a.writeResponseError(w, err, http.StatusBadRequest)
 			return
 		}
-		callError(w, err, http.StatusInternalServerError)
+		a.internalError(w, err)
 		return
 	}
 
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(id)
+	_ = json.NewEncoder(w).Encode(u.ID)
 }
 
-func (a *API) getUsersHandler(w http.ResponseWriter, r *http.Request) {
-	u := a.store.GetAllUsers()
-
-	if len(u) == 0 {
-		callError(w, ErrEmptyDB, http.StatusInternalServerError)
-		return
-	}
+func (a *API) GetUsersHandler(w http.ResponseWriter, r *http.Request) {
+	users := a.store.GetAllUsers()
 
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(u)
+	_ = json.NewEncoder(w).Encode(users)
 }
 
-func (a *API) getUserByIDHandler(w http.ResponseWriter, r *http.Request) {
+func (a *API) GetUserByIDHandler(w http.ResponseWriter, r *http.Request) {
 	id := mux.Vars(r)["id"]
 	uid, err := uuid.Parse(id)
 	if err != nil {
-		callError(w, fmt.Errorf("invalid parameter passed: %s", err), http.StatusBadRequest)
+		a.writeResponseError(w, fmt.Errorf("invalid parameter passed: %s", err), http.StatusBadRequest)
 		return
 	}
 
 	u, err := a.store.GetUserByID(uid)
 	if err != nil {
-		callError(w, err, http.StatusBadRequest)
+		a.writeResponseError(w, err, http.StatusBadRequest)
 		return
 	}
 
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(u)
+	_ = json.NewEncoder(w).Encode(u)
 }
 
-func (a *API) updateUserHandler(w http.ResponseWriter, r *http.Request) {
-	admin, ok := r.Context().Value(isAdmin).(bool)
-	if !ok {
-		callError(w, ErrWrongContext, http.StatusInternalServerError)
-		return
-	}
-	if !admin {
-		callError(w, ErrPermissionsDenied, http.StatusForbidden)
+func (a *API) UpdateUserHandler(w http.ResponseWriter, r *http.Request) {
+	if !isAdminUser(r.Context()) {
+		a.writeResponseError(w, ErrPermissionsDenied, http.StatusForbidden)
 		return
 	}
 
 	id := mux.Vars(r)["id"]
 	uid, err := uuid.Parse(id)
 	if err != nil {
-		callError(w, fmt.Errorf("invalid parameter passed: %s", err), http.StatusBadRequest)
+		a.writeResponseError(w, fmt.Errorf("invalid parameter passed: %s", err), http.StatusBadRequest)
 		return
 	}
 
-	u, err := a.store.GetUserByID(uid)
+	var u database.User
+	err = json.NewDecoder(r.Body).Decode(&u)
 	if err != nil {
-		callError(w, err, http.StatusBadRequest)
+		a.writeResponseError(w, fmt.Errorf("wrong JSON: %s", err), http.StatusBadRequest)
 		return
 	}
 
-	var newData database.User
-	err = json.NewDecoder(r.Body).Decode(&newData)
-	if err != nil {
-		callError(w, fmt.Errorf("wrong JSON: %s", err), http.StatusBadRequest)
-		return
+	if u.Email != "" {
+		if err := validate.Var(u.Email, "email"); err != nil {
+			a.writeResponseError(w, fmt.Errorf("invalid data passed: %s", err), http.StatusBadRequest)
+		}
 	}
 
-	if newData.Username != "" && newData.Username != u.Username {
-		u.Username = newData.Username
-	}
-	if newData.Password != "" && newData.Password != u.Password {
-		u.Password = newData.Password
-	}
-	if newData.Email != "" && newData.Email != u.Email {
-		u.Email = newData.Email
-	}
-	u.Admin = newData.Admin
+	u.ID = uid
 
-	err = validate.Struct(u)
+	err = a.store.UpdateUser(&u)
 	if err != nil {
-		callError(w, fmt.Errorf("invalid data passed: %s", err), http.StatusBadRequest)
-		return
-	}
-
-	err = a.store.UpdateUser(u)
-	if err != nil {
-		callError(w, err, http.StatusBadRequest)
+		if errors.Is(err, database.ErrUserNotExist) || errors.Is(err, database.ErrNameAlreadyExist) {
+			a.writeResponseError(w, err, http.StatusBadRequest)
+			return
+		}
+		a.internalError(w, err)
 		return
 	}
 
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (a *API) deleteUserHandler(w http.ResponseWriter, r *http.Request) {
-	admin, ok := r.Context().Value(isAdmin).(bool)
-	if !ok {
-		callError(w, ErrWrongContext, http.StatusInternalServerError)
-		return
-	}
-	if !admin {
-		callError(w, ErrPermissionsDenied, http.StatusForbidden)
+func (a *API) DeleteUserHandler(w http.ResponseWriter, r *http.Request) {
+	if !isAdminUser(r.Context()) {
+		a.writeResponseError(w, ErrPermissionsDenied, http.StatusForbidden)
 		return
 	}
 
 	id := mux.Vars(r)["id"]
 	uid, err := uuid.Parse(id)
 	if err != nil {
-		callError(w, fmt.Errorf("invalid parameter passed: %s", err), http.StatusBadRequest)
+		a.writeResponseError(w, fmt.Errorf("invalid parameter passed: %s", err), http.StatusBadRequest)
 		return
 	}
 
 	err = a.store.DeleteUser(uid)
 	if err != nil {
-		callError(w, err, http.StatusBadRequest)
+		a.writeResponseError(w, err, http.StatusBadRequest)
 		return
 	}
 
